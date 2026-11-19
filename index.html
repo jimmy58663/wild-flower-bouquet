@@ -114,7 +114,7 @@ function addP(p, col, mat, n, t) {
   P.push({ x: p[0], y: p[1], z: p[2], c: rgb(col), ci: palIndex(col), m: mat, n: n || [0, 1, 0], t: t || null });
 }
 // A local frame at a flower head: n points out of the face, u/v span it.
-const HEAD_SCALE = 1.8;
+let HEAD_SCALE = 1.8; // set per bouquet: smaller on portrait phones
 function frame(c, n) {
   n = norm(n);
   const u = norm(cross(Math.abs(n[1]) < 0.95 ? [0, 1, 0] : [1, 0, 0], n)), v = cross(n, u), k = HEAD_SCALE;
@@ -331,60 +331,68 @@ function buildBouquet(seed) {
     : [...shuffle(az, r).slice(0, 3 + Math.floor(r() * 2)), ...shuffle(classic, r).slice(0, 1 + Math.floor(r() * 2))];
   let stems = [];
   for (const k of kinds) { const c = 2 + Math.floor(r() * 2); for (let i = 0; i < c; i++) stems.push({ kind: k }); }
-  while (stems.length < 10) stems.push({ kind: pick(kinds, r) });
-  stems = shuffle(stems, r).slice(0, 12); // cap the flower count so heads have room
+  while (stems.length < 13) stems.push({ kind: pick(kinds, r) });
+  const portrait = (innerHeight || 1) > (innerWidth || 1);
+  stems = shuffle(stems, r).slice(0, portrait ? 11 : 16);
+  HEAD_SCALE = portrait ? 1.45 : 1.8;
   const fillerKinds = CONFIG.arizonaOnly ? ['creosote', 'grass', 'seedhead'] : Object.keys(FILLERS);
-  for (let i = 0, nf = 2 + Math.floor(r() * 2); i < nf; i++) stems.push({ kind: pick(fillerKinds, r), fill: true });
+  for (let i = 0, nf = 3 + Math.floor(r() * 2); i < nf; i++) stems.push({ kind: pick(fillerKinds, r), fill: true });
   stems = shuffle(stems, r);
 
-  // 1) initial head positions on a wide dome
-  const R = 12 + stems.length * 0.55, Y0 = 16, Y1 = 40;
+  // Layout like a wide fan: every stem radiates from one point at the bottom
+  // and its flower sits on a broad spherical cap, spread up to ~70 degrees
+  // from vertical (narrower on a portrait screen), so flowers reach out low
+  // on the sides and there is plenty of dark space between them.
+  // portrait phones get a narrower, taller fan with more variety in stem length
+  // flowers sit at many different heights (stem lengths vary a lot); on
+  // portrait screens outer stems are shorter so the fan grows upward
+  const MAX_TH = (portrait ? 36 : 68) * Math.PI / 180, LMIN = portrait ? 14 : 16, LMAX = portrait ? 52 : 44;
+  const lmax = th => LMAX * (1 - (portrait ? 0.35 : 0.15) * th / MAX_TH);
   const heads = stems.map((s, i) => {
+    // even spread over the cap (Fibonacci spiral), with a little jitter
     const t = (i + 0.5) / stems.length;
-    const rad = R * Math.sqrt(t) * (0.9 + 0.2 * r()), ang = i * 2.39996 + r() * 0.4;
-    let y = 18 + Math.sqrt(Math.max(0, 1 - (rad / (R * 1.1)) ** 2)) * 15 + (r() * 8 - 4);
-    const spike = !s.fill && SPECIES[s.kind].spike;
-    if (spike) y -= 3;
-    if (s.fill) y -= 1.5;
-    // spikes are tall, so measure their spacing from the middle of the spike
-    return { s, x: Math.cos(ang) * rad, y, z: Math.sin(ang) * rad, lift: spike ? 5 : 0, size: s.fill ? 3 : 5 };
+    const th = Math.acos(1 - t * (1 - Math.cos(MAX_TH))) + (r() - 0.5) * 0.08, ph = i * 2.39996 + (r() - 0.5) * 0.3;
+    const L = LMIN + Math.sqrt(r()) * (lmax(th) - LMIN) * (s.fill ? 0.75 : 1);
+    return { s, th, ph, L, spike: !s.fill && SPECIES[s.kind].spike, size: s.fill ? 4 : 7 };
   });
-  // 2) push apart any heads that sit too close (simple relaxation)
-  for (let it = 0; it < 80; it++) {
+  const pos = h => [Math.sin(h.th) * Math.cos(h.ph) * h.L, Math.cos(h.th) * h.L, Math.sin(h.th) * Math.sin(h.ph) * h.L];
+  // nudge apart any two flowers that still ended up close
+  for (let it = 0; it < 60; it++) {
     for (let i = 0; i < heads.length; i++) for (let j = i + 1; j < heads.length; j++) {
-      const A = heads[i], B = heads[j];
-      const dx = B.x - A.x, dy = (B.y + B.lift) - (A.y + A.lift), dz = B.z - A.z;
-      const d = Math.hypot(dx, dy, dz) || 0.01, min = A.size + B.size;
+      const A = heads[i], B = heads[j], pa = pos(A), pb = pos(B);
+      const d = Math.hypot(pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]) || 0.01, min = A.size + B.size;
       if (d >= min) continue;
-      const push = (min - d) / d * 0.5;
-      A.x -= dx * push; A.y -= dy * push; A.z -= dz * push;
-      B.x += dx * push; B.y += dy * push; B.z += dz * push;
+      const push = (min - d) / min * 0.05;
+      let dth = B.th - A.th, dph = Math.atan2(Math.sin(B.ph - A.ph), Math.cos(B.ph - A.ph));
+      if (Math.abs(dth) + Math.abs(dph) < 1e-3) { dth = 0.01; dph = 0.01; }
+      A.th -= dth * push * 4; B.th += dth * push * 4; A.ph -= dph * push * 4; B.ph += dph * push * 4;
+      A.L -= Math.sign(B.L - A.L) * push * 10; B.L += Math.sign(B.L - A.L) * push * 10;
     }
-    for (const h of heads) { // stay inside the bouquet's overall shape
-      const rr = Math.hypot(h.x, h.z), lim = R * 1.15;
-      if (rr > lim) { h.x *= lim / rr; h.z *= lim / rr; }
-      h.y = clamp(h.y, Y0, Y1 - h.lift);
-    }
+    for (const h of heads) { h.th = clamp(h.th, 0, MAX_TH); h.L = clamp(h.L, LMIN, lmax(h.th)); }
   }
-  // 3) stems and heads
-  for (const { s, x: hx, y: hy, z: hz } of heads) {
-    const n = norm([hx / R * 0.85 + (r() - 0.5) * 0.3, 1, hz / R * 0.85 + (r() - 0.5) * 0.3]);
-    const head = [hx, hy, hz];
+  for (const h of heads) { const p = pos(h); h.x = p[0]; h.y = p[1]; h.z = p[2]; }
+
+  for (const h of heads) {
+    const { s, x: hx, y: hy, z: hz } = h;
+    const dir = norm([hx, hy, hz]);
+    // flower faces look mostly up (flat ovals, like the reference); spikes follow their stem
+    const n = h.spike ? dir : norm([dir[0] * 0.45 + (r() - 0.5) * 0.2, 1, dir[2] * 0.45 + (r() - 0.5) * 0.2]);
     const stemCol = pick([0x4f8a2b, 0x5a9a34, 0x467a28], r);
-    bez([(r() - 0.5) * 0.5, 0, (r() - 0.5) * 0.5], [hx * 0.3, hy * 0.5, hz * 0.3], [hx - n[0] * 0.4, hy - n[1] * 0.4, hz - n[2] * 0.4], stemCol, 'stem', (p, tt) => {
-      if (tt > 0.3 && tt < 0.8 && r() < 0.09) {
-        const la = r() * 6.28, L = 1.5 + r() * 1.5;
-        seg(p, [p[0] + Math.cos(la) * L, p[1] + 0.6, p[2] + Math.sin(la) * L], 0x62a33a, 'leaf', 0.3);
+    // stems leave the bundle fairly upright, then splay out to their flower
+    bez([(r() - 0.5) * 0.5, 0, (r() - 0.5) * 0.5], [hx * 0.18, hy * 0.45, hz * 0.18], [hx - n[0] * 0.4, hy - n[1] * 0.4, hz - n[2] * 0.4], stemCol, 'stem', (p, tt) => {
+      if (tt > 0.35 && tt < 0.85 && r() < 0.07) {
+        const la = r() * 6.28, Lf = 1.5 + r() * 1.5;
+        seg(p, [p[0] + Math.cos(la) * Lf, p[1] + 0.6, p[2] + Math.sin(la) * Lf], 0x62a33a, 'leaf', 0.3);
       }
     });
-    (s.fill ? FILLERS[s.kind] : SPECIES[s.kind].fn)(frame(head, n), r);
+    (s.fill ? FILLERS[s.kind] : SPECIES[s.kind].fn)(frame([hx, hy, hz], n), r);
   }
   lastHeads = heads;
 
   // ribbon + bow
   const rib = pick([0xff6aa0, 0xff8fbf, 0xc08af0, 0xffd06a, 0x7ab8ff, 0xff5a5a], r);
-  for (let y = 5; y <= 6.6; y += 0.4) for (let i = 0; i < 40; i++) {
-    const a = i / 40 * 6.283; addP([Math.cos(a) * 1.9, y, Math.sin(a) * 1.9], rib, 'ribbon', [Math.cos(a), 0, Math.sin(a)]);
+  for (let y = 4.4; y <= 6; y += 0.4) for (let i = 0; i < 40; i++) {
+    const a = i / 40 * 6.283; addP([Math.cos(a) * 2.2, y, Math.sin(a) * 2.2], rib, 'ribbon', [Math.cos(a), 0, Math.sin(a)]);
   }
   for (const side of [-1, 1]) {
     for (let i = 0; i < 22; i++) { const a = i / 22 * 6.283; addP([side * 1.4 + Math.cos(a) * 1.1, 6.4 + Math.sin(a) * 0.8, 2.1], rib, 'ribbon', [side * Math.cos(a), Math.sin(a), 0.7]); }
@@ -483,7 +491,7 @@ function drawLines(lines, x, y, c) {
     if (lines[j][i] !== ' ') drawGlyph(lines[j][i], ox + i * cellW, oy + j * cellH, c);
 }
 
-const TILT = 0.3, CAM = 110;
+const TILT = 0.36, CAM = 200;
 function resize() {
   DPR = window.devicePixelRatio || 1;
   const cw = innerWidth || document.documentElement.clientWidth || 800;
@@ -494,9 +502,19 @@ function resize() {
   fit();
 }
 function fit() {
-  const h = bounds.maxY - bounds.minY, R = bounds.maxR;
-  const worldH = h * Math.cos(TILT) + 2 * R * Math.sin(TILT) + 3;
-  scale = Math.min(H * 0.82 / worldH, W * 0.92 / (2 * R + 2));
+  // measure the bouquet's real on-screen extent over a full turn
+  const cyW = (bounds.minY + bounds.maxY) / 2, ct = Math.cos(TILT), st = Math.sin(TILT);
+  let xm = 1, ymin = 1e9, ymax = -1e9;
+  for (let k = 0; k < 16; k++) {
+    const an = k / 16 * 6.283, ca = Math.cos(an), sa = Math.sin(an);
+    for (let i = 0; i < P.length; i += 3) {
+      const p = P[i], x1 = p.x * ca + p.z * sa, z1 = -p.x * sa + p.z * ca, y1 = p.y - cyW;
+      const y2 = y1 * ct - z1 * st, z2 = y1 * st + z1 * ct, f = CAM / (CAM - z2);
+      xm = Math.max(xm, Math.abs(x1 * f)); ymin = Math.min(ymin, y2 * f); ymax = Math.max(ymax, y2 * f);
+    }
+  }
+  scale = Math.min(H * 0.8 / (ymax - ymin + 2), W * 0.94 / (2 * xm + 2));
+  const viewCenter = (ymax + ymin) / 2;
   const newCellH = clamp(scale / 1.05, 9 * DPR, 24 * DPR);
   if (Math.abs(newCellH - cellH) > 0.01) {
     cellH = newCellH; cellW = cellH * 0.62;
@@ -513,7 +531,7 @@ function fit() {
     ch: new Array(N).fill(''), cand: new Array(N).fill(''), cnt: new Uint8Array(N), seen: new Int32Array(N).fill(-9),
     sk: new Float32Array(N), sl: new Float32Array(N), sw: new Float32Array(N),
   };
-  originY = H * 0.47;
+  originY = H * 0.47 + viewCenter * scale; // centre of the bouquet sits 47% down the screen
 }
 
 const L = norm([-0.35, 0.55, 0.76]);
@@ -545,13 +563,15 @@ function renderBouquet(dt, angle, s, bob) {
     const idx = cellOf[i]; if (idx < 0) continue;
     const dz = zb[idx] - zA[i]; if (dz > BAND) continue;
     const p = P[i];
-    let b = 0.85;
+    let b = 0.85, under = 1;
     if (p.m !== 'stem') {
       const n = p.n, nx = n[0] * ca + n[2] * sa, nz0 = -n[0] * sa + n[2] * ca, ny = n[1] * ct - nz0 * st, nz = n[1] * st + nz0 * ct;
       b = clamp(0.3 + 0.75 * Math.max(0, nx * L[0] + ny * L[1] + nz * L[2]) + 0.15 * Math.max(0, nz), 0, 1);
+      if (nz < -0.1) under = 0.55; // back of a petal: darker, so faces stand out
     }
     const w = 1 - 0.7 * dz / BAND;
-    C.sk[idx] += (0.6 + 0.5 * b) * clamp(0.78 + 0.22 * zA[i] / R, 0.5, 1.05) * w; C.sl[idx] += b * w; C.sw[idx] += w;
+    // depth fog: flowers at the back of the bouquet are noticeably dimmer
+    C.sk[idx] += (0.6 + 0.5 * b) * under * clamp(0.72 + 0.35 * zA[i] / R, 0.42, 1.05) * w; C.sl[idx] += b * w; C.sw[idx] += w;
   }
   // 2) draw each covered cell. No fading or trails: a cell shows this frame's
   // value, except that a new character or palette colour must hold for a few
