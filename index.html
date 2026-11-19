@@ -321,7 +321,7 @@ const FILLERS = {
   },
 };
 
-let bounds = { minY: 0, maxY: 40, maxR: 14 };
+let bounds = { minY: 0, maxY: 40, maxR: 14 }, lastHeads = [];
 function buildBouquet(seed) {
   P = [];
   const r = mulberry32(seed);
@@ -331,20 +331,43 @@ function buildBouquet(seed) {
     : [...shuffle(az, r).slice(0, 3 + Math.floor(r() * 2)), ...shuffle(classic, r).slice(0, 1 + Math.floor(r() * 2))];
   let stems = [];
   for (const k of kinds) { const c = 2 + Math.floor(r() * 2); for (let i = 0; i < c; i++) stems.push({ kind: k }); }
-  while (stems.length < 11) stems.push({ kind: pick(kinds, r) });
+  while (stems.length < 10) stems.push({ kind: pick(kinds, r) });
+  stems = shuffle(stems, r).slice(0, 12); // cap the flower count so heads have room
   const fillerKinds = CONFIG.arizonaOnly ? ['creosote', 'grass', 'seedhead'] : Object.keys(FILLERS);
-  for (let i = 0, nf = 3 + Math.floor(r() * 2); i < nf; i++) stems.push({ kind: pick(fillerKinds, r), fill: true });
+  for (let i = 0, nf = 2 + Math.floor(r() * 2); i < nf; i++) stems.push({ kind: pick(fillerKinds, r), fill: true });
   stems = shuffle(stems, r);
 
-  const R = 10 + stems.length * 0.4;
-  stems.forEach((s, i) => {
+  // 1) initial head positions on a wide dome
+  const R = 12 + stems.length * 0.55, Y0 = 16, Y1 = 40;
+  const heads = stems.map((s, i) => {
     const t = (i + 0.5) / stems.length;
     const rad = R * Math.sqrt(t) * (0.9 + 0.2 * r()), ang = i * 2.39996 + r() * 0.4;
-    const hx = Math.cos(ang) * rad, hz = Math.sin(ang) * rad;
-    // dome-ish, but with plenty of height variation so heads don't form a flat crown
-    let hy = 19 + Math.sqrt(Math.max(0, 1 - (rad / (R * 1.1)) ** 2)) * 12 + (r() * 7 - 3.5);
-    if (!s.fill && SPECIES[s.kind].spike) hy -= 2;
-    if (s.fill) hy -= 1.5;
+    let y = 18 + Math.sqrt(Math.max(0, 1 - (rad / (R * 1.1)) ** 2)) * 15 + (r() * 8 - 4);
+    const spike = !s.fill && SPECIES[s.kind].spike;
+    if (spike) y -= 3;
+    if (s.fill) y -= 1.5;
+    // spikes are tall, so measure their spacing from the middle of the spike
+    return { s, x: Math.cos(ang) * rad, y, z: Math.sin(ang) * rad, lift: spike ? 5 : 0, size: s.fill ? 3 : 5 };
+  });
+  // 2) push apart any heads that sit too close (simple relaxation)
+  for (let it = 0; it < 80; it++) {
+    for (let i = 0; i < heads.length; i++) for (let j = i + 1; j < heads.length; j++) {
+      const A = heads[i], B = heads[j];
+      const dx = B.x - A.x, dy = (B.y + B.lift) - (A.y + A.lift), dz = B.z - A.z;
+      const d = Math.hypot(dx, dy, dz) || 0.01, min = A.size + B.size;
+      if (d >= min) continue;
+      const push = (min - d) / d * 0.5;
+      A.x -= dx * push; A.y -= dy * push; A.z -= dz * push;
+      B.x += dx * push; B.y += dy * push; B.z += dz * push;
+    }
+    for (const h of heads) { // stay inside the bouquet's overall shape
+      const rr = Math.hypot(h.x, h.z), lim = R * 1.15;
+      if (rr > lim) { h.x *= lim / rr; h.z *= lim / rr; }
+      h.y = clamp(h.y, Y0, Y1 - h.lift);
+    }
+  }
+  // 3) stems and heads
+  for (const { s, x: hx, y: hy, z: hz } of heads) {
     const n = norm([hx / R * 0.85 + (r() - 0.5) * 0.3, 1, hz / R * 0.85 + (r() - 0.5) * 0.3]);
     const head = [hx, hy, hz];
     const stemCol = pick([0x4f8a2b, 0x5a9a34, 0x467a28], r);
@@ -355,7 +378,8 @@ function buildBouquet(seed) {
       }
     });
     (s.fill ? FILLERS[s.kind] : SPECIES[s.kind].fn)(frame(head, n), r);
-  });
+  }
+  lastHeads = heads;
 
   // ribbon + bow
   const rib = pick([0xff6aa0, 0xff8fbf, 0xc08af0, 0xffd06a, 0x7ab8ff, 0xff5a5a], r);
@@ -472,7 +496,7 @@ function resize() {
 function fit() {
   const h = bounds.maxY - bounds.minY, R = bounds.maxR;
   const worldH = h * Math.cos(TILT) + 2 * R * Math.sin(TILT) + 3;
-  scale = Math.min(H * 0.76 / worldH, W * 0.9 / (2 * R + 2));
+  scale = Math.min(H * 0.82 / worldH, W * 0.92 / (2 * R + 2));
   const newCellH = clamp(scale / 1.05, 9 * DPR, 24 * DPR);
   if (Math.abs(newCellH - cellH) > 0.01) {
     cellH = newCellH; cellW = cellH * 0.62;
