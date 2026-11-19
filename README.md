@@ -1,12 +1,24 @@
 # Wildflowers
 
-A slowly spinning 3D pixel-art (voxel) bouquet of randomized wildflowers, with
-sparkles, stars and hearts, a day → sunset → night → dawn sky, and messages on
-special dates. It is a single `index.html` with no dependencies besides the
-Google pixel font (it falls back to a monospace font offline).
+A slowly spinning 3D bouquet of randomized wildflowers drawn entirely with
+glowing text characters (`o 0 @ : / =`), with sparkles, stars and `<3` hearts
+on a slowly shifting night sky. It is a single `index.html` with no
+dependencies besides a Google monospace font (it falls back to Consolas offline).
 
 - **Tap / click**: new random bouquet
 - **Drag**: spin it by hand
+
+## Flowers
+
+Each bouquet mixes 3–4 Sonoran Desert natives (southern Arizona up to Phoenix)
+with 1–2 classic wildflowers, plus fillers. Set `arizonaOnly: true` in
+`CONFIG` for natives only.
+
+- **Arizona natives**: Mexican gold poppy, desert lupine, owl's clover, desert marigold,
+  brittlebush, globemallow, Parry's penstemon, fairy duster, mariposa lily,
+  sand verbena, saguaro blossom (the state flower)
+- **Classics**: oxeye daisy, red poppy, cornflower, wild rose, lavender
+- **Fillers**: creosote sprigs, desert grass seed heads, grass, baby's breath
 
 ## Special dates
 
@@ -19,16 +31,16 @@ Edit the `CONFIG` block near the top of the `<script>` in `index.html`:
 | Jun 24 | Happy Anniversary      | extra hearts    |
 | Dec 24 | Merry Christmas Eve    | snow            |
 | Dec 25 | Merry Christmas        | snow            |
-| other  | Picked just for you    | —               |
+| other  | picked just for you    | —               |
 
 ## Testing
 
 URL parameters (these only work when the page is served over http, not from a double-clicked file):
 
 - `?date=02-14`: pretend it's a given month-day
-- `?time=0.65`: start at a point in the day cycle (0 day, .38 sunset, .65 night, .9 dawn)
+- `?time=0.5`: start at a point in the background colour cycle
 
-Local server: `python -m http.server 8765`, then open http://localhost:8765/?date=12-25&time=0.65
+Local server: `python -m http.server 8765`, then open http://localhost:8765/?date=12-25
 
 ## Installing
 
