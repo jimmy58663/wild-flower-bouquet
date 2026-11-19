@@ -107,7 +107,7 @@ function addP(p, col, mat, n, t) {
   P.push({ x: p[0], y: p[1], z: p[2], c: rgb(col), m: mat, n: n || [0, 1, 0], t: t || null });
 }
 // A local frame at a flower head: n points out of the face, u/v span it.
-const HEAD_SCALE = 1.35;
+const HEAD_SCALE = 1.8;
 function frame(c, n) {
   n = norm(n);
   const u = norm(cross(Math.abs(n[1]) < 0.95 ? [0, 1, 0] : [1, 0, 0], n)), v = cross(n, u), k = HEAD_SCALE;
@@ -118,7 +118,7 @@ function frame(c, n) {
   };
 }
 // flat or cupped disc (cup > 0 opens upward like a poppy, < 0 domes like a daisy centre)
-function disc(F, R, h, cup, fn, step = 0.3) {
+function disc(F, R, h, cup, fn, step = 0.22) {
   const k = cup / (R * R);
   for (let a = -R; a <= R + 1e-6; a += step) for (let b = -R; b <= R + 1e-6; b += step) {
     const d = Math.hypot(a, b); if (d > R) continue;
@@ -127,7 +127,7 @@ function disc(F, R, h, cup, fn, step = 0.3) {
   }
 }
 // sphere-ish shell of points; fn(y, theta) -> [colour, material, radiusScale]
-function shell(F, R, h, minY, fn, step = 0.3) {
+function shell(F, R, h, minY, fn, step = 0.22) {
   const N = Math.ceil(4 * Math.PI * R * R / (step * step));
   for (let i = 0; i < N; i++) {
     const y = 1 - 2 * (i + 0.5) / N; if (y < minY) continue;
@@ -138,7 +138,7 @@ function shell(F, R, h, minY, fn, step = 0.3) {
   }
 }
 // tapered spike along the frame normal; fn(t, theta) -> [colour, material]
-function spike(F, H, radFn, fn, step = 0.3) {
+function spike(F, H, radFn, fn, step = 0.22) {
   for (let k = 0; k <= H; k += step * 0.85) {
     const t = k / H, rad = radFn(t), n = Math.max(1, Math.round(2 * Math.PI * rad / step));
     for (let i = 0; i < n; i++) {
@@ -168,66 +168,77 @@ const sub = (F, a, b, h, tilt = 0.5) => frame(F.at(a, b, h), F.dir(a * tilt, b *
 /* ---------- species ----------
    az: true = native to the Sonoran Desert (southern Arizona to Phoenix) */
 const SPECIES = {
+  /* Colours follow the flower's shape (bands, sectors, distance from the
+     centre) rather than being random per point. Random speckles shimmer
+     as the bouquet turns because neighbouring points take turns winning
+     each character cell. */
+
   /* ----- Arizona natives ----- */
   mexicanGoldPoppy: { az: true, fn(F, r) {
     const rot = r() * 6.28;
     disc(F, 2.8, 0, 2.2, (d, a) => d < 0.5 ? null : Math.cos(4 * (a + rot)) < -0.75 && d > 2 ? null
       : [d < 1.1 ? 0xff8a10 : d > 2.2 ? 0xffde5a : 0xffc21a, 'petal']);
-    disc(F, 0.55, 0.35, 0, () => [0xd86a10, 'center'], 0.25);
+    disc(F, 0.55, 0.35, 0, () => [0xd86a10, 'center']);
   } },
   desertLupine: { az: true, spike: true, fn(F, r) {
     const H = 6 + r() * 1.5;
-    spike(F, H, t => 1.5 * (1 - t) + 0.3, (t, th) => [t > 0.85 ? 0xa8a8ff : r() < 0.15 ? 0xf0f0ff : (Math.floor(t * 12) & 1 ? 0x5a4ad8 : 0x7a6af2), 'spike']);
+    // whorls: each band is purple-blue with a white "banner" on its upper edge
+    spike(F, H, t => 1.5 * (1 - t) + 0.3, t => {
+      if (t > 0.85) return [0xa8a8ff, 'spike'];
+      const w = (t * 7) % 1;
+      return [w > 0.72 ? 0xe8e8ff : w > 0.36 ? 0x7a6af2 : 0x5a4ad8, 'spike'];
+    });
   } },
   owlsClover: { az: true, spike: true, fn(F, r) {
     const H = 4.5 + r();
-    spike(F, H, t => 1.15 * (1 - t * 0.55), (t, th) => [t > 0.78 ? 0xffeef4 : r() < 0.18 ? 0xffe060 : (r() < 0.5 ? 0xd6407a : 0xb8306a), 'spike']);
+    // magenta spike, banded, with white-and-yellow tipped top
+    spike(F, H, t => 1.15 * (1 - t * 0.55), t => {
+      if (t > 0.8) return [0xfff0f6, 'spike'];
+      if (t > 0.68) return [0xffe070, 'spike'];
+      return [(t * 5) % 1 > 0.5 ? 0xd6407a : 0xc03272, 'spike'];
+    });
   } },
   desertMarigold: { az: true, fn(F, r) {
     const rot = r() * 6.28;
-    disc(F, 3.0, 0, 0.4, (d, a) => d < 1 ? null : Math.cos(17 * (a + rot)) > -0.5 || d < 2 ? [d > 2.4 ? 0xffe46a : 0xffd21f, 'petal'] : null);
-    disc(F, 2.3, 0.3, 0.3, (d, a) => d < 1 ? null : Math.cos(15 * (a + rot + 0.1)) > 0 ? [0xffcc10, 'petal'] : null);
-    disc(F, 1.1, 0.5, -0.5, d => [d < 0.5 ? 0xf8c020 : 0xe8a000, 'center'], 0.25);
+    disc(F, 3.0, 0, 0.4, (d, a) => d < 1 ? null : Math.cos(9 * (a + rot)) > -0.6 || d < 2.1 ? [d > 2.4 ? 0xffe46a : 0xffd21f, 'petal'] : null);
+    disc(F, 1.1, 0.5, -0.5, d => [d < 0.5 ? 0xf8c020 : 0xe8a000, 'center']);
   } },
   brittlebush: { az: true, fn(F, r) {
     for (let i = 0; i < 3; i++) {
       const a = Math.cos(i * 2.1 + r()) * 1.9, b = Math.sin(i * 2.1 + r()) * 1.9, h = r() * 1.2;
       seg(F.at(0, 0, -1), F.at(a, b, h - 0.2), 0x9aa880);
       const S = sub(F, a, b, h, 0.3), rot = r() * 6;
-      disc(S, 1.6, 0, 0.3, (d, ang) => d < 0.5 ? null : Math.cos(11 * (ang + rot)) > -0.4 || d < 1.1 ? [0xffcf20, 'petal'] : null, 0.26);
-      disc(S, 0.55, 0.25, -0.2, () => [0x6a3a14, 'center'], 0.22);
+      disc(S, 1.6, 0, 0.3, (d, ang) => d < 0.5 ? null : Math.cos(7 * (ang + rot)) > -0.5 || d < 1.2 ? [0xffcf20, 'petal'] : null);
+      disc(S, 0.55, 0.25, -0.2, () => [0x6a3a14, 'center']);
     }
   } },
   globemallow: { az: true, spike: true, fn(F, r) {
     const H = 6;
     seg(F.at(0, 0, 0), F.at(0, 0, H), 0x7a9a5a);
-    for (let k = 1; k < H; k += 1.15) {
+    for (let k = 1; k < H; k += 1.4) {
       const th = k * 2.4, a = Math.cos(th), b = Math.sin(th);
       const S = frame(F.at(a * 0.7, b * 0.7, k), F.dir(a, b, 0.7));
-      disc(S, 0.95, 0, 0.6, d => [d < 0.35 ? 0xffd08a : d > 0.7 ? 0xff6a2a : 0xff8a48, 'petal'], 0.22);
+      disc(S, 1.0, 0, 0.6, d => [d < 0.35 ? 0xffd08a : 0xff7a3a, 'petal']);
     }
-    disc(frame(F.at(0, 0, H + 0.2), F.n), 0.5, 0, 0, () => [0xffb080, 'dots'], 0.25);
+    disc(frame(F.at(0, 0, H + 0.2), F.n), 0.5, 0, 0, () => [0xffb080, 'dots']);
   } },
   parrysPenstemon: { az: true, spike: true, fn(F, r) {
     const H = 6.5;
     seg(F.at(0, 0, 0), F.at(0, 0, H), 0x5f8a3a);
-    for (let k = 0.6; k < H; k += 0.9) {
+    // tubular flowers drawn as small solid cones pointing outward
+    for (let k = 0.6; k < H; k += 1.1) {
       for (const side of [0, Math.PI]) {
-        const th = side + k * 1.3, a = Math.cos(th), b = Math.sin(th), len = 1.6 * (1 - k / H * 0.5);
-        const p0 = F.at(a * 0.2, b * 0.2, k), p1 = F.at(a * len, b * len, k - 0.5);
-        seg(p0, p1, 0xf0509a, 'petal', 0.22);
-        addP(p1, 0xff9ac8, 'dots', F.dir(a, b, 0));
+        const th = side + k * 1.3, a = Math.cos(th), b = Math.sin(th);
+        const S = frame(F.at(a * 0.3, b * 0.3, k), F.dir(a, b, -0.35));
+        spike(S, 1.5 * (1 - k / H * 0.4), t => 0.25 + t * 0.4, t => [t > 0.75 ? 0xff9ac8 : 0xf0509a, 'petal']);
       }
     }
   } },
   fairyDuster: { az: true, fn(F, r) {
-    for (let i = 0; i < 46; i++) {
-      const th = r() * 6.28, y = -0.25 + r() * 1.25, rr = Math.sqrt(Math.max(0, 1 - y * y));
-      const d = F.dir(Math.cos(th) * rr, Math.sin(th) * rr, y), L = 1.8 + r() * 1.2, o = F.at(0, 0, 0.3);
-      const tip = [o[0] + d[0] * L, o[1] + d[1] * L, o[2] + d[2] * L];
-      seg([o[0] + d[0] * 0.4, o[1] + d[1] * 0.4, o[2] + d[2] * 0.4], tip, r() < 0.5 ? 0xff3a8a : 0xff5aa0, 'stem', 0.3);
-      addP(tip, 0xffd0e6, 'dots', d);
-    }
+    // pom-pom of pink stamens: a fuzzy ball, deeper pink inside, pale tips outside
+    shell(F, 1.4, 0.5, -0.4, () => [0xe0306e, 'spike']);
+    shell(F, 2.5, 0.5, -0.3, (y, th) => Math.cos(th * 7) * Math.cos(y * 9) > -0.3 ? [0xff5aa0, 'spiky', 0.92] : null);
+    shell(F, 2.9, 0.5, -0.2, (y, th) => Math.cos(th * 7) * Math.cos(y * 9) > 0.45 ? [0xffd0e6, 'dots'] : null);
   } },
   mariposaLily: { az: true, fn(F, r) {
     const rot = r() * 6.28;
@@ -238,36 +249,41 @@ const SPECIES = {
     });
   } },
   sandVerbena: { az: true, fn(F, r) {
-    shell(F, 1.9, 0.4, -0.2, () => [r() < 0.12 ? 0xffffff : r() < 0.5 ? 0xc050c0 : 0xe080e0, 'dots', 0.9 + r() * 0.2], 0.32);
+    // round cluster: magenta florets with paler centres in a regular pattern
+    shell(F, 1.9, 0.4, -0.2, (y, th) => [Math.cos(th * 5) * Math.cos(y * 6) > 0.55 ? 0xf6c8f6 : y > 0.4 ? 0xe080e0 : 0xc050c0, 'petal']);
   } },
   saguaroBlossom: { az: true, fn(F, r) {
     const rot = r() * 6.28;
-    disc(F, 2.6, 0, 1.5, (d, a) => d < 1 ? null : Math.cos(10 * (a + rot)) > -0.6 ? [d > 2 ? 0xffffff : 0xece8d8, 'petal'] : null);
-    disc(F, 1.15, 0.45, -0.3, d => [d < 0.5 ? 0xfff090 : 0xffd84a, 'center'], 0.22);
+    disc(F, 2.6, 0, 1.5, (d, a) => d < 1 ? null : Math.cos(6 * (a + rot)) > -0.7 || d < 1.8 ? [d > 2 ? 0xffffff : 0xece8d8, 'petal'] : null);
+    disc(F, 1.15, 0.45, -0.3, d => [d < 0.5 ? 0xfff090 : 0xffd84a, 'center']);
   } },
 
   /* ----- classic wildflowers ----- */
   daisy: { az: false, fn(F, r) {
     const R = 3 + r() * 0.5, rot = r() * 6.28;
-    disc(F, R, 0, 0.5, (d, a) => d < 1.1 ? null : Math.cos(12 * (a + rot)) > -0.2 || d < 1.8 ? [d > R - 0.6 ? 0xf2efe6 : 0xffffff, 'petal'] : null);
-    disc(F, 1.15, 0.35, -0.4, d => [d < 0.5 ? 0xffd84a : 0xf2b92e, 'center'], 0.25);
+    disc(F, R, 0, 0.5, (d, a) => d < 1.1 ? null : Math.cos(8 * (a + rot)) > -0.45 || d < 2 ? [d > R - 0.6 ? 0xf2efe6 : 0xffffff, 'petal'] : null);
+    disc(F, 1.15, 0.35, -0.4, d => [d < 0.5 ? 0xffd84a : 0xf2b92e, 'center']);
   } },
   redPoppy: { az: false, fn(F, r) {
     const rot = r() * 6.28;
     disc(F, 3, 0, 2.2, (d, a) => d < 0.8 ? null : [Math.cos(4 * (a + rot)) > 0.2 ? 0xe8302a : 0xc81e18, 'petal']);
-    disc(F, 0.85, 0.4, 0, () => [0x2a1a1a, 'center'], 0.25);
+    disc(F, 0.85, 0.4, 0, () => [0x2a1a1a, 'center']);
   } },
   cornflower: { az: false, fn(F, r) {
-    shell(F, 1.2, 0.6, -0.1, () => [0x5a2a8a, 'center'], 0.3);
-    shell(F, 2.4, 0.4, 0.0, () => r() < 0.55 ? [pick([0x3b5bd9, 0x2747b8, 0x5a7af0], r), 'spiky', 0.75 + r() * 0.35] : null, 0.3);
+    shell(F, 1.2, 0.6, -0.1, () => [0x5a2a8a, 'center']);
+    // ragged edge made from a regular pattern of florets
+    shell(F, 2.4, 0.4, 0.0, (y, th) => {
+      const m = Math.cos(th * 8) * Math.cos(y * 7);
+      return m > -0.35 ? [y > 0.5 ? 0x5a7af0 : 0x3b5bd9, 'spiky', 0.8 + 0.2 * Math.max(0, m)] : null;
+    });
   } },
   wildRose: { az: false, fn(F, r) {
     const rot = r() * 6.28;
-    disc(F, 3, 0, 0.8, (d, a) => Math.cos(5 * (a + rot)) > -0.4 || d < 2 ? [d > 2.2 ? 0xffb8d2 : d > 1.2 ? 0xf28ab2 : 0xe86a9a, 'petal'] : null);
-    disc(F, 0.8, 0.4, -0.3, () => [0xffd84d, 'center'], 0.22);
+    disc(F, 3, 0, 0.8, (d, a) => Math.cos(5 * (a + rot)) > -0.45 || d < 2.1 ? [d > 2.2 ? 0xffb8d2 : d > 1.2 ? 0xf28ab2 : 0xe86a9a, 'petal'] : null);
+    disc(F, 0.8, 0.4, -0.3, () => [0xffd84d, 'center']);
   } },
   lavender: { az: false, spike: true, fn(F, r) {
-    spike(F, 5.5, t => 0.65 * (1 - t * 0.5), () => r() < 0.75 ? [pick([0x8e6bc9, 0xa98ad8, 0x6d4fb0], r), 'spike'] : null);
+    spike(F, 5.5, t => 0.65 * (1 - t * 0.5), t => [(t * 8) % 1 > 0.5 ? 0x8e6bc9 : 0x6d4fb0, 'spike']);
   } },
 };
 
@@ -287,7 +303,7 @@ const FILLERS = {
     }
   },
   seedhead(F, r) {   // desert grass seed heads
-    spike(F, 3.5, t => 0.45 * (1 - t), () => r() < 0.8 ? [r() < 0.5 ? 0xd9b45a : 0xe8cc80, 'spike'] : null, 0.28);
+    spike(F, 3.5, t => 0.45 * (1 - t), t => [(t * 6) % 1 > 0.5 ? 0xd9b45a : 0xe8cc80, 'spike']);
   },
   babysBreath(F, r) {
     for (let i = 0; i < 6; i++) {
@@ -308,12 +324,12 @@ function buildBouquet(seed) {
     : [...shuffle(az, r).slice(0, 3 + Math.floor(r() * 2)), ...shuffle(classic, r).slice(0, 1 + Math.floor(r() * 2))];
   let stems = [];
   for (const k of kinds) { const c = 2 + Math.floor(r() * 2); for (let i = 0; i < c; i++) stems.push({ kind: k }); }
-  while (stems.length < 14) stems.push({ kind: pick(kinds, r) });
+  while (stems.length < 11) stems.push({ kind: pick(kinds, r) });
   const fillerKinds = CONFIG.arizonaOnly ? ['creosote', 'grass', 'seedhead'] : Object.keys(FILLERS);
   for (let i = 0, nf = 3 + Math.floor(r() * 2); i < nf; i++) stems.push({ kind: pick(fillerKinds, r), fill: true });
   stems = shuffle(stems, r);
 
-  const R = 11 + stems.length * 0.35;
+  const R = 10 + stems.length * 0.4;
   stems.forEach((s, i) => {
     const t = (i + 0.5) / stems.length;
     const rad = R * Math.sqrt(t) * (0.9 + 0.2 * r()), ang = i * 2.39996 + r() * 0.4;
@@ -353,11 +369,11 @@ function buildBouquet(seed) {
    GLYPH RENDERER
    ===================================================================== */
 const RAMPS = {
-  petal:  '.:oO0',
-  center: '.*#@@',
-  spike:  '.:o8%',
-  spiky:  '.+*xX',
-  dots:   '.ooo@',
+  petal:  'ooOO0',
+  center: '**#@@',
+  spike:  'oo88%',
+  spiky:  '++*xX',
+  dots:   'oooo@',
   leaf:   '-===',
   ribbon: '-==#',
 };
@@ -423,17 +439,20 @@ function fit() {
     ch: new Array(N).fill(''), cand: new Array(N).fill(''), cnt: new Uint8Array(N), ramp: new Array(N).fill(null),
     hit: new Uint8Array(N), tr: new Float32Array(N), tg: new Float32Array(N), tb: new Float32Array(N), tl: new Float32Array(N),
     tch: new Array(N).fill(''), tramp: new Array(N).fill(null),
+    sr: new Float32Array(N), sg: new Float32Array(N), sb: new Float32Array(N), sl: new Float32Array(N), sw: new Float32Array(N),
   };
   originY = H * 0.47;
 }
 
 const L = norm([-0.35, 0.55, 0.76]);
 const touched = [];
+let cellOf = new Int32Array(0), zA = new Float32Array(0);
 function renderBouquet(dt, angle, s, bob, tint) {
   const ca = Math.cos(angle), sa = Math.sin(angle), ct = Math.cos(TILT), st = Math.sin(TILT);
   const cy = (bounds.minY + bounds.maxY) / 2, cx0 = W / 2, R = bounds.maxR;
   touched.length = 0;
-  const sxA = new Float32Array(P.length), syA = new Float32Array(P.length), zA = new Float32Array(P.length);
+  if (cellOf.length < P.length) { cellOf = new Int32Array(P.length); zA = new Float32Array(P.length); }
+  // pass 1: project every point, find the front-most depth in each cell
   for (let i = 0; i < P.length; i++) {
     const p = P[i];
     const x1 = (p.x * ca + p.z * sa) * s, z1 = (-p.x * sa + p.z * ca) * s, y1 = (p.y - cy) * s + bob;
@@ -441,37 +460,45 @@ function renderBouquet(dt, angle, s, bob, tint) {
     const f = CAM / (CAM - z2);
     const sx = cx0 + x1 * scale * f, sy = originY - y2 * scale * f;
     const col = Math.floor(sx / cellW), row = Math.floor(sy / cellH);
-    if (col < 0 || row < 0 || col >= cols || row >= rows) continue;
+    if (col < 0 || row < 0 || col >= cols || row >= rows) { cellOf[i] = -1; continue; }
     const idx = row * cols + col;
     if (zb[idx] === -1e9) touched.push(idx);
     if (z2 > zb[idx]) { zb[idx] = z2; who[idx] = i; }
-    sxA[i] = sx; syA[i] = sy; zA[i] = z2;
+    cellOf[i] = idx; zA[i] = z2;
   }
-  // 1) work out what each covered cell *wants* to show this frame
+  // pass 2: average the colour/brightness of every point near the front of
+  // its cell (anti-aliasing), so a cell doesn't jump between single points
+  const BAND = 1.4 * s, C = cell;
+  for (let i = 0; i < P.length; i++) {
+    const idx = cellOf[i]; if (idx < 0) continue;
+    const dz = zb[idx] - zA[i]; if (dz > BAND) continue;
+    const p = P[i];
+    let b = 0.85;
+    if (p.m !== 'stem') {
+      const n = p.n, nx = n[0] * ca + n[2] * sa, nz0 = -n[0] * sa + n[2] * ca, ny = n[1] * ct - nz0 * st, nz = n[1] * st + nz0 * ct;
+      b = clamp(0.3 + 0.75 * Math.max(0, nx * L[0] + ny * L[1] + nz * L[2]) + 0.15 * Math.max(0, nz), 0, 1);
+    }
+    const w = 1 - 0.7 * dz / BAND, k = (0.6 + 0.5 * b) * clamp(0.78 + 0.22 * zA[i] / R, 0.5, 1.05) * w;
+    C.sr[idx] += p.c[0] * k; C.sg[idx] += p.c[1] * k; C.sb[idx] += p.c[2] * k; C.sl[idx] += b * w; C.sw[idx] += w;
+  }
+  // character style comes from the front-most point in each cell
   for (const idx of touched) {
-    const i = who[idx], p = P[i];
+    const p = P[who[idx]], w = C.sw[idx];
     zb[idx] = -1e9;
-    const fog = clamp(0.78 + 0.22 * zA[i] / R, 0.5, 1.05);
-    let ch = '', b, ramp = null;
+    let ch = '', ramp = null;
     if (p.m === 'stem') {
       // character follows the on-screen direction of the stem
       const t = p.t, tx = t[0] * ca + t[2] * sa, tz = -t[0] * sa + t[2] * ca, ty = t[1] * ct - tz * st;
       let a = Math.atan2(ty, tx); if (a < 0) a += Math.PI;
       ch = a < 0.39 || a > 2.75 ? '-' : a < 1.18 ? '/' : a < 1.96 ? ':' : '\\';
-      b = 0.85;
-    } else {
-      const n = p.n, nx = n[0] * ca + n[2] * sa, nz0 = -n[0] * sa + n[2] * ca, ny = n[1] * ct - nz0 * st, nz = n[1] * st + nz0 * ct;
-      const d = nx * L[0] + ny * L[1] + nz * L[2];
-      b = clamp(0.3 + 0.75 * Math.max(0, d) + 0.15 * Math.max(0, nz), 0, 1);
-      ramp = RAMPS[p.m] || RAMPS.petal;
-    }
-    const k = (0.45 + 0.65 * b) * fog;
-    cell.hit[idx] = 1;
-    cell.tr[idx] = Math.min(255, p.c[0] * k * tint[0]); cell.tg[idx] = Math.min(255, p.c[1] * k * tint[1]); cell.tb[idx] = Math.min(255, p.c[2] * k * tint[2]);
-    cell.tl[idx] = b; cell.tch[idx] = ch; cell.tramp[idx] = ramp;
+    } else ramp = RAMPS[p.m] || RAMPS.petal;
+    C.hit[idx] = 1;
+    C.tr[idx] = Math.min(255, C.sr[idx] / w * tint[0]); C.tg[idx] = Math.min(255, C.sg[idx] / w * tint[1]); C.tb[idx] = Math.min(255, C.sb[idx] / w * tint[2]);
+    C.tl[idx] = C.sl[idx] / w; C.tch[idx] = ch; C.tramp[idx] = ramp;
+    C.sr[idx] = C.sg[idx] = C.sb[idx] = C.sl[idx] = C.sw[idx] = 0;
   }
   // 2) ease every cell toward its target; fade out cells nothing covers any more
-  const ease = 1 - Math.exp(-dt * 4), C = cell;
+  const ease = 1 - Math.exp(-dt * 4);
   for (let idx = 0, N = cols * rows; idx < N; idx++) {
     if (C.hit[idx]) {
       C.hit[idx] = 0;
@@ -485,7 +512,12 @@ function renderBouquet(dt, angle, s, bob, tint) {
       }
       C.a[idx] = Math.min(1, C.a[idx] + ease * 1.6);
       const ramp = C.ramp[idx];
-      const want = ramp ? ramp[Math.min(ramp.length - 1, Math.floor(C.lum[idx] * ramp.length))] : C.tch[idx];
+      let want = C.tch[idx];
+      if (ramp) {
+        // dead zone: keep the current character unless brightness clearly leaves its band
+        const n = ramp.length, cur = ramp.indexOf(C.ch[idx]), l = C.lum[idx] * n;
+        want = cur >= 0 && l > cur - 0.35 && l < cur + 1.35 ? C.ch[idx] : ramp[Math.min(n - 1, Math.floor(l))];
+      }
       // only switch character after the new one has held for a few frames
       if (!C.ch[idx]) C.ch[idx] = want;
       else if (want === C.ch[idx]) C.cnt[idx] = 0;
