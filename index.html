@@ -1,0 +1,825 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>Wildflowers</title>
+<meta name="theme-color" content="#2b2864">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #0c1032;
+    touch-action: none; user-select: none; -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #stage { position: fixed; inset: 0; overflow: hidden; cursor: grab; }
+  #stage:active { cursor: grabbing; }
+  #stage canvas {
+    position: absolute; left: 0; top: 0;
+    image-rendering: crisp-edges;
+    image-rendering: pixelated;
+  }
+  .pixel-text {
+    position: fixed; left: 0; right: 0; text-align: center;
+    font-family: 'Press Start 2P', 'Courier New', monospace;
+    color: #fff; pointer-events: none; padding: 0 16px;
+  }
+  #msg {
+    top: max(7vh, calc(env(safe-area-inset-top) + 16px));
+    font-size: clamp(15px, 4.4vw, 34px); line-height: 1.6;
+    text-shadow: 3px 3px 0 #3a1f4a, -1px -1px 0 #3a1f4a, 1px -1px 0 #3a1f4a, -1px 1px 0 #3a1f4a;
+    opacity: 0; transform: translateY(-8px);
+    transition: opacity 2.5s ease, transform 2.5s ease;
+  }
+  #msg.show { opacity: 1; transform: none; }
+  #hint {
+    bottom: max(3vh, calc(env(safe-area-inset-bottom) + 12px));
+    font-size: clamp(8px, 2.2vw, 12px); line-height: 1.6;
+    text-shadow: 2px 2px 0 #3a1f4a; opacity: 0; transition: opacity 1.5s ease;
+  }
+  #hint.show { opacity: .85; }
+  #nogl { display: none; top: 40vh; font-size: 12px; line-height: 2; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="bg"></canvas>
+  <canvas id="gl"></canvas>
+  <canvas id="fx"></canvas>
+</div>
+<div id="msg" class="pixel-text"></div>
+<div id="hint" class="pixel-text"></div>
+<div id="nogl" class="pixel-text">This browser can't show the flowers (WebGL2 needed).<br>Try Chrome or Edge.</div>
+
+<script>
+'use strict';
+
+/* =====================================================================
+   SETTINGS: edit messages here.
+   month is 1-12. Test a date by adding ?date=MM-DD to the URL,
+   e.g. index.html?date=02-14
+   ===================================================================== */
+const CONFIG = {
+  messages: [
+    { month: 2,  day: 2,  text: 'Happy Birthday!',        theme: 'birthday'    },
+    { month: 2,  day: 14, text: "Happy Valentine's Day",  theme: 'valentine'   },
+    { month: 6,  day: 24, text: 'Happy Anniversary',      theme: 'anniversary' },
+    { month: 12, day: 24, text: 'Merry Christmas Eve',    theme: 'christmas'   },
+    { month: 12, day: 25, text: 'Merry Christmas',        theme: 'christmas'   },
+  ],
+  defaultMessage: 'Picked just for you',
+  dayCycleSeconds: 300,   // one full day -> sunset -> night -> dawn loop
+  spinSpeed: 0.35,        // radians per second
+};
+
+/* ---------- utilities ---------- */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const hex2rgb = h => [(h >> 16 & 255) / 255, (h >> 8 & 255) / 255, (h & 255) / 255];
+const lerp = (a, b, t) => a + (b - a) * t;
+const lerp3 = (a, b, t) => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+function hash3(x, y, z) {
+  let h = Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(z, 2147483647);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+const pick = (arr, r) => arr[Math.floor(r() * arr.length)];
+function shuffle(arr, r) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+
+/* ---------- date message ---------- */
+function todaysMessage() {
+  const q = new URLSearchParams(location.search).get('date');
+  let m, d;
+  if (q && /^\d{1,2}-\d{1,2}$/.test(q)) { [m, d] = q.split('-').map(Number); }
+  else { const now = new Date(); m = now.getMonth() + 1; d = now.getDate(); }
+  const hit = CONFIG.messages.find(e => e.month === m && e.day === d);
+  return hit || { text: CONFIG.defaultMessage, theme: 'default' };
+}
+
+/* =====================================================================
+   VOXEL MODEL
+   ===================================================================== */
+let V = new Map();
+function put(x, y, z, col) {
+  x = Math.round(x); y = Math.round(y); z = Math.round(z);
+  V.set(x + ',' + y + ',' + z, [x, y, z, col]);
+}
+function has(x, y, z) { return V.has(x + ',' + y + ',' + z); }
+
+// 6-connected voxel line so stems never look broken
+function line(a, b, col) {
+  const n = Math.ceil(Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]), Math.abs(b[2] - a[2])) * 1.5) || 1;
+  let prev = null;
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    const p = [Math.round(lerp(a[0], b[0], t)), Math.round(lerp(a[1], b[1], t)), Math.round(lerp(a[2], b[2], t))];
+    if (prev) {
+      // step axis by axis
+      const q = prev.slice();
+      for (let ax = 0; ax < 3; ax++) { if (q[ax] !== p[ax]) { q[ax] = p[ax]; put(q[0], q[1], q[2], col); } }
+    }
+    put(p[0], p[1], p[2], col);
+    prev = p;
+  }
+}
+function bezier(a, c, b, col, onPoint) {
+  const steps = 24;
+  let prev = a;
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps, u = 1 - t;
+    const p = [u*u*a[0] + 2*u*t*c[0] + t*t*b[0], u*u*a[1] + 2*u*t*c[1] + t*t*b[1], u*u*a[2] + 2*u*t*c[2] + t*t*b[2]];
+    line(prev, p, col);
+    if (onPoint) onPoint(p, t);
+    prev = p;
+  }
+}
+
+const C = {
+  stem: 0x4f8a2b, stemDark: 0x3d7022, leaf: 0x62a33a, leafLight: 0x86c04e, cut: 0xa8cf72,
+};
+
+/* ---------- flower heads: (x,y,z) is where the stem ends ---------- */
+const SPECIES = {
+  daisy(x, y, z, r) {
+    const R = r() < 0.4 ? 4 : 3, petals = R > 3 ? 13 : 10, rot = r() * 6.28;
+    for (let dx = -R; dx <= R; dx++) for (let dz = -R; dz <= R; dz++) {
+      const d = Math.hypot(dx, dz), a = Math.atan2(dz, dx);
+      if (d <= 1.25) {
+        put(x + dx, y, z + dz, 0xe0a21a);
+        put(x + dx, y + 1, z + dz, d < 0.5 ? 0xf7d24a : 0xf2b92e);
+      } else if (d <= R + 0.4) {
+        const m = Math.cos(petals * (a + rot));
+        if (m > -0.25 || d < 2.2) put(x + dx, y, z + dz, m > 0.5 ? 0xffffff : 0xeeeae0);
+      }
+    }
+    put(x, y - 1, z, C.stem);
+  },
+  blackEyedSusan(x, y, z, r) {
+    const R = 4, rot = r() * 6.28;
+    for (let dx = -R; dx <= R; dx++) for (let dz = -R; dz <= R; dz++) {
+      const d = Math.hypot(dx, dz), a = Math.atan2(dz, dx);
+      if (d <= 1.5) {
+        put(x + dx, y + 1, z + dz, 0x4a2a12);
+        put(x + dx, y, z + dz, 0x3a200c);
+        if (d < 0.8) put(x + dx, y + 2, z + dz, 0x5c3618);
+      } else if (d <= R + 0.4) {
+        const m = Math.cos(11 * (a + rot));
+        if (m > -0.3 || d < 2.4) put(x + dx, d > R - 0.6 ? y - 1 : y, z + dz, m > 0.4 ? 0xffc21a : 0xf0a010);
+      }
+    }
+    put(x, y - 1, z, C.stem);
+  },
+  poppy(x, y, z, r) {
+    const pal = r() < 0.7 ? [0xe02a1f, 0xb81a12, 0xf0503a] : [0xf7931e, 0xdc6e0c, 0xffb040];
+    const rot = r() * 6.28;
+    for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) {
+      const d = Math.hypot(dx, dz), a = Math.atan2(dz, dx);
+      if (d <= 1.7) put(x + dx, y, z + dz, pal[1]);
+      if (d > 1.2 && d <= 2.8) put(x + dx, y + 1, z + dz, pal[0]);
+      if (d > 2.2 && d <= 3.6 && Math.cos(4 * (a + rot)) > -0.45) put(x + dx, y + 2, z + dz, (dx + dz) & 1 ? pal[0] : pal[2]);
+    }
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) put(x + dx, y + 1, z + dz, 0x1e1414);
+    put(x, y + 2, z, 0x6b7a3a);
+    put(x, y - 1, z, C.stem);
+  },
+  cornflower(x, y, z, r) {
+    const blues = [0x3b5bd9, 0x2747b8, 0x5a7af0];
+    for (let dx = -3; dx <= 3; dx++) for (let dy = -1; dy <= 3; dy++) for (let dz = -3; dz <= 3; dz++) {
+      const d = Math.hypot(dx, dy * 1.2, dz);
+      if (d <= 1.6) put(x + dx, y + 1 + dy, z + dz, 0x4b2a7a);
+      else if (d <= 3.3 && dy >= 0 && r() > 0.35) put(x + dx, y + 1 + dy, z + dz, pick(blues, r));
+    }
+    put(x, y, z, 0x3d7022); put(x, y - 1, z, C.stem);
+  },
+  buttercup(x, y, z, r) {
+    const rot = r() * 6.28;
+    for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+      const d = Math.hypot(dx, dz), a = Math.atan2(dz, dx);
+      if (d <= 1.5) put(x + dx, y, z + dz, 0xffd21f);
+      if (d > 1 && d <= 2.4 && Math.cos(5 * (a + rot)) > -0.35) put(x + dx, y + 1, z + dz, (dx * dz) & 1 ? 0xfff07a : 0xffd21f);
+    }
+    put(x, y + 1, z, 0xd9a400);
+  },
+  forgetMeNot(x, y, z, r) {
+    const n = 5 + Math.floor(r() * 3);
+    for (let i = 0; i < n; i++) {
+      const ox = Math.round((r() * 2 - 1) * 2.6), oz = Math.round((r() * 2 - 1) * 2.6), oy = Math.floor(r() * 3);
+      line([x, y - 1, z], [x + ox, y + oy - 1, z + oz], C.leaf);
+      const fx = x + ox, fy = y + oy, fz = z + oz, b = r() < 0.5 ? 0x7fb6ff : 0x9cc8ff;
+      put(fx, fy, fz, 0xffe066);
+      put(fx + 1, fy, fz, b); put(fx - 1, fy, fz, b); put(fx, fy, fz + 1, b); put(fx, fy, fz - 1, b);
+    }
+  },
+  lupine(x, y, z, r) {
+    const pal = pick([[0x6a4bc4, 0x8f6ee6, 0xc0aaf6], [0xd85aa8, 0xee86c4, 0xf8c2e0], [0x4a64d8, 0x6f88ee, 0xb0c0f8]], r);
+    const H = 8 + Math.floor(r() * 4);
+    for (let k = 0; k < H; k++) {
+      const rad = 2.0 * (1 - k / H) + 0.4;
+      for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+        if (Math.hypot(dx, dz) <= rad) put(x + dx, y + k, z + dz, k >= H - 2 ? pal[2] : ((k + dx + dz) & 1 ? pal[0] : pal[1]));
+      }
+    }
+  },
+  lavender(x, y, z, r) {
+    const pal = [0x8e6bc9, 0xa98ad8, 0x6d4fb0];
+    const H = 6 + Math.floor(r() * 3);
+    for (let k = 0; k < H; k++) {
+      put(x, y + k, z, pick(pal, r));
+      if (k < H - 1) for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) if (r() < 0.5) put(x + dx, y + k, z + dz, pick(pal, r));
+    }
+  },
+  foxglove(x, y, z, r) {
+    const pal = r() < 0.75 ? [0xd96aa7, 0xf09ac8, 0x8a2a5a] : [0xf2e6f0, 0xffffff, 0x9a4a7a];
+    const H = 11 + Math.floor(r() * 3);
+    const dirs = [[1, 0], [0, 1], [-1, 0], [0, -1]];
+    for (let k = 0; k < H; k++) {
+      put(x, y + k, z, C.stem);
+      if (k < H - 3 && k % 2 === 0) {
+        for (let j = 0; j < 2; j++) {
+          const [dx, dz] = dirs[(k / 2 + j * 2 + (r() < 0.3 ? 1 : 0)) % 4];
+          put(x + dx, y + k, z + dz, pal[0]);
+          put(x + dx * 2, y + k, z + dz * 2, pal[0]);
+          put(x + dx * 2, y + k - 1, z + dz * 2, pal[1]);
+          put(x + dx * 2 + dz, y + k - 1, z + dz * 2 + dx, pal[2]);
+        }
+      } else if (k >= H - 3) {
+        if (r() < 0.6) put(x + pick([-1, 1], r), y + k, z, k === H - 1 ? 0x7aa84a : pal[1]);
+      }
+    }
+  },
+  queenAnnesLace(x, y, z, r) {
+    for (let i = 0; i < 7; i++) {
+      const a = i / 7 * 6.28;
+      line([x, y - 1, z], [x + Math.cos(a) * 2.6, y, z + Math.sin(a) * 2.6], 0x7aa84a);
+    }
+    for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) {
+      const d = Math.hypot(dx, dz);
+      if (d <= 3.7 && r() < 0.88) put(x + dx, y + 1, z + dz, r() < 0.5 ? 0xf7f7f0 : 0xe4e4d4);
+      if (d <= 2 && r() < 0.35) put(x + dx, y + 2, z + dz, 0xffffff);
+    }
+    put(x, y + 2, z, 0x5a1f4a);
+  },
+  wildRose(x, y, z, r) {
+    const pal = r() < 0.7 ? [0xf28ab2, 0xe86a9a, 0xffb8d2] : [0xfff0f4, 0xf6d2dc, 0xffffff];
+    const rot = r() * 6.28;
+    for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) {
+      const d = Math.hypot(dx, dz), a = Math.atan2(dz, dx);
+      if (d > 3.4) continue;
+      if (Math.cos(5 * (a + rot)) > -0.45 || d < 1.9) {
+        if (d > 2.4) put(x + dx, y + 1, z + dz, pal[2]);
+        else put(x + dx, y, z + dz, d > 1.5 ? pal[0] : pal[1]);
+      }
+    }
+    put(x, y + 1, z, 0xe8b020);
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) put(x + dx, y + 1, z + dz, 0xffd84d);
+    put(x, y - 1, z, C.stem);
+  },
+};
+
+const FILLERS = {
+  babysBreath(x, y, z, r) {
+    for (let i = 0; i < 6; i++) {
+      const tip = [x + (r() * 2 - 1) * 3.5, y + r() * 3.5, z + (r() * 2 - 1) * 3.5];
+      line([x, y - 1, z], tip, 0x8ab060);
+      put(tip[0], tip[1] + 1, tip[2], 0xffffff);
+      if (r() < 0.6) put(tip[0] + 1, tip[1], tip[2], 0xf4f4ff);
+      if (r() < 0.6) put(tip[0], tip[1], tip[2] + 1, 0xf4f4ff);
+    }
+  },
+  wheat(x, y, z, r) {
+    const H = 6;
+    for (let k = 0; k < H; k++) {
+      put(x, y + k, z, 0xd9b45a);
+      if (k < H - 1) put(x + (k & 1 ? 1 : -1), y + k, z, 0xc89a3a);
+      if (k < H - 1) put(x, y + k, z + (k & 1 ? -1 : 1), 0xe6c878);
+    }
+    line([x, y + H, z], [x + 1, y + H + 3, z], 0xe8d090);
+    line([x, y + H, z], [x - 1, y + H + 2, z + 1], 0xe8d090);
+  },
+  grass(x, y, z, r) {
+    for (let i = 0; i < 3; i++) {
+      const ox = (r() * 2 - 1) * 3, oz = (r() * 2 - 1) * 3;
+      bezier([x, y - 3, z], [x + ox * 0.2, y + 1, z + oz * 0.2], [x + ox * 1.2, y + 1 + r() * 3, z + oz * 1.2], i ? 0x7fb04a : 0x9cc860);
+    }
+  },
+};
+const SPIKES = new Set(['lupine', 'lavender', 'foxglove']);
+
+let bounds = { minY: 0, maxY: 40, maxR: 14 };
+
+function buildBouquet(seed) {
+  V = new Map();
+  const r = mulberry32(seed);
+  const kinds = shuffle(Object.keys(SPECIES), r).slice(0, 4 + Math.floor(r() * 3));
+  let stems = [];
+  for (const k of kinds) { const c = 2 + Math.floor(r() * 3); for (let i = 0; i < c; i++) stems.push({ kind: k, fill: false }); }
+  while (stems.length < 13) stems.push({ kind: pick(kinds, r), fill: false });
+  const nf = 2 + Math.floor(r() * 2);
+  for (let i = 0; i < nf; i++) stems.push({ kind: pick(Object.keys(FILLERS), r), fill: true });
+  stems = shuffle(stems, r);
+
+  const GY = 13, R = 10 + stems.length * 0.2;
+  const heads = [];
+  stems.forEach((s, i) => {
+    const t = (i + 0.5) / stems.length;
+    const rad = R * Math.sqrt(t) * (0.9 + 0.2 * r());
+    const ang = i * 2.39996 + r() * 0.4;
+    const hx = Math.cos(ang) * rad, hz = Math.sin(ang) * rad;
+    // heads sit on a dome: tallest in the middle, lower toward the rim
+    let hy = 24 + Math.sqrt(Math.max(0, 1 - (rad / (R * 1.1)) ** 2)) * 10 + (r() * 3 - 1.5);
+    if (SPIKES.has(s.kind)) hy -= 3;
+    if (s.fill) hy -= 1;
+    const gx = (r() * 2 - 1) * 1.2, gz = (r() * 2 - 1) * 1.2;
+    line([gx * 1.3, 0, gz * 1.3], [gx, GY, gz], C.stem);
+    bezier([gx, GY, gz], [hx * 0.2, (GY + hy) / 2, hz * 0.2], [hx, hy - 1, hz], r() < 0.5 ? C.stem : C.stemDark, (p, tt) => {
+      if (tt > 0.25 && tt < 0.75 && r() < 0.12) {
+        const lx = pick([-1, 1], r), lz = pick([-1, 1], r);
+        put(p[0] + lx, p[1], p[2], C.leaf);
+        put(p[0] + lx * 2, p[1] + 1, p[2] + lz, C.leaf);
+        put(p[0] + lx * 3, p[1] + 2, p[2] + lz, C.leafLight);
+      }
+    });
+    heads.push([s, hx, hy, hz]);
+  });
+
+  // solid stem bundle under the ribbon
+  for (let y = 0; y <= GY; y++) {
+    const rad = 2.1 + (GY - y) * 0.05;
+    for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) {
+      const d = Math.hypot(dx, dz);
+      if (d <= rad) put(dx, y, dz, y === 0 ? C.cut : ((dx * 3 + dz) % 3 === 0 ? C.stemDark : C.stem));
+    }
+  }
+
+  for (const [s, hx, hy, hz] of heads) (s.fill ? FILLERS : SPECIES)[s.kind](hx, hy, hz, r);
+
+  // ribbon + bow
+  const rib = pick([[0xe84a7a, 0xb8305a], [0xf6a8c6, 0xd47aa0], [0xa070d8, 0x7a50b0], [0xf4e6c0, 0xd0b880], [0x6a9ae8, 0x4a72c0], [0xe84040, 0xb02828]], r);
+  for (let y = 9; y <= 12; y++) for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) {
+    const d = Math.hypot(dx, dz);
+    if (d <= 3.2) put(dx, y, dz, y === 9 || y === 12 ? rib[1] : rib[0]);
+  }
+  for (const side of [-1, 1]) {
+    for (let i = 0; i < 20; i++) {
+      const a = i / 20 * 6.283;
+      put(side * 2.6 + Math.cos(a) * 1.8, 11.5 + Math.sin(a) * 1.4, 4, rib[0]);
+    }
+    line([side * 0.5, 10, 4], [side * 2.2, 5, 4], rib[1]);
+    put(side * 2.4, 4, 4, rib[0]);
+  }
+  put(0, 11, 4, rib[1]); put(0, 10, 4, rib[1]); put(0, 11, 5, rib[1]); put(0, 10, 5, rib[1]);
+
+  let minY = 1e9, maxY = -1e9, maxR = 0;
+  for (const [x, y, z] of V.values()) {
+    minY = Math.min(minY, y); maxY = Math.max(maxY, y); maxR = Math.max(maxR, Math.hypot(x, z));
+  }
+  bounds = { minY: minY - 0.5, maxY: maxY + 0.5, maxR: maxR + 1 };
+}
+
+const FACES = [
+  [[1, 0, 0], [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]]],
+  [[-1, 0, 0], [[0, 0, 0], [0, 0, 1], [0, 1, 1], [0, 1, 0]]],
+  [[0, 1, 0], [[0, 1, 0], [0, 1, 1], [1, 1, 1], [1, 1, 0]]],
+  [[0, -1, 0], [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]]],
+  [[0, 0, 1], [[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]]],
+  [[0, 0, -1], [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]]],
+];
+function buildMesh() {
+  const out = [];
+  for (const [x, y, z, col] of V.values()) {
+    const j = 0.92 + hash3(x, y, z) * 0.13;
+    const c = hex2rgb(col).map(v => Math.min(1, v * j));
+    for (const [n, q] of FACES) {
+      if (has(x + n[0], y + n[1], z + n[2])) continue;
+      for (const idx of [0, 1, 2, 0, 2, 3]) {
+        const p = q[idx];
+        out.push(x - 0.5 + p[0], y - 0.5 + p[1], z - 0.5 + p[2], n[0], n[1], n[2], c[0], c[1], c[2]);
+      }
+    }
+  }
+  return new Float32Array(out);
+}
+
+/* =====================================================================
+   WEBGL
+   ===================================================================== */
+const stage = document.getElementById('stage');
+const bgC = document.getElementById('bg'), glC = document.getElementById('gl'), fxC = document.getElementById('fx');
+const gl = glC.getContext('webgl2', { antialias: false, alpha: true, premultipliedAlpha: true });
+const bgX = bgC.getContext('2d'), fxX = fxC.getContext('2d');
+if (!gl) document.getElementById('nogl').style.display = 'block';
+
+function shader(type, src) {
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+function program(vs, fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, shader(gl.VERTEX_SHADER, vs)); gl.attachShader(p, shader(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+
+let voxProg, postProg, vao, emptyVao, vbo, vertCount = 0, fbo, colTex, depTex, U = {}, PU = {};
+if (gl) {
+  voxProg = program(`#version 300 es
+    layout(location=0) in vec3 aPos; layout(location=1) in vec3 aNrm; layout(location=2) in vec3 aCol;
+    uniform mat4 uProj, uView; uniform float uShift;
+    out vec3 vCol; out vec3 vN;
+    void main(){ vec4 p = uProj * uView * vec4(aPos,1.0); p.y += uShift; gl_Position = p;
+      vN = mat3(uView) * aNrm; vCol = aCol; }`,
+  `#version 300 es
+    precision mediump float;
+    in vec3 vCol; in vec3 vN; uniform vec3 uLight; out vec4 o;
+    void main(){ vec3 n = normalize(vN); vec3 L = normalize(vec3(-0.45, 0.75, 0.55));
+      float sh = 0.55 + 0.55 * max(dot(n, L), 0.0); sh = floor(sh * 5.0 + 0.5) / 5.0;
+      o = vec4(vCol * sh * uLight, 1.0); }`);
+  postProg = program(`#version 300 es
+    void main(){ vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }`,
+  `#version 300 es
+    precision highp float;
+    uniform sampler2D uCol; uniform highp sampler2D uDep; uniform vec3 uOutline; out vec4 o;
+    void main(){
+      ivec2 sz = textureSize(uCol, 0); ivec2 p = ivec2(gl_FragCoord.xy);
+      ivec2 off[4] = ivec2[4](ivec2(1,0), ivec2(-1,0), ivec2(0,1), ivec2(0,-1));
+      vec4 c = texelFetch(uCol, p, 0);
+      if (c.a < 0.5) {
+        for (int i = 0; i < 4; i++) if (texelFetch(uCol, clamp(p + off[i], ivec2(0), sz - 1), 0).a > 0.5) { o = vec4(uOutline, 1.0); return; }
+        o = vec4(0.0); return;
+      }
+      float d = texelFetch(uDep, p, 0).r, m = 0.0;
+      for (int i = 0; i < 4; i++) { float dn = texelFetch(uDep, clamp(p + off[i], ivec2(0), sz - 1), 0).r; if (d - dn > 0.014) m = 1.0; }
+      o = vec4(mix(c.rgb, uOutline, 0.55 * m), 1.0);
+    }`);
+  for (const n of ['uProj', 'uView', 'uShift', 'uLight']) U[n] = gl.getUniformLocation(voxProg, n);
+  for (const n of ['uCol', 'uDep', 'uOutline']) PU[n] = gl.getUniformLocation(postProg, n);
+
+  vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+  vbo = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  for (let i = 0; i < 3; i++) { gl.enableVertexAttribArray(i); gl.vertexAttribPointer(i, 3, gl.FLOAT, false, 36, i * 12); }
+  emptyVao = gl.createVertexArray();
+}
+
+function uploadMesh() {
+  const data = buildMesh();
+  vertCount = data.length / 9;
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+}
+
+function makeTargets(w, h) {
+  if (fbo) { gl.deleteFramebuffer(fbo); gl.deleteTexture(colTex); gl.deleteTexture(depTex); }
+  const tex = () => { const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+    for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+    return t; };
+  colTex = tex(); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  depTex = tex(); gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, w, h, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+  fbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, colTex, 0);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, depTex, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+/* ---------- matrices (column-major) ---------- */
+function mul(a, b) {
+  const o = new Float32Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s; }
+  return o;
+}
+const rotX = t => { const c = Math.cos(t), s = Math.sin(t); return [1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, 0, 0, 0, 1]; };
+const rotY = t => { const c = Math.cos(t), s = Math.sin(t); return [c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, 0, 0, 0, 1]; };
+const trans = (x, y, z) => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1];
+const scl = s => [s, 0, 0, 0, 0, s, 0, 0, 0, 0, s, 0, 0, 0, 0, 1];
+
+/* =====================================================================
+   LAYOUT
+   ===================================================================== */
+const TILT = 0.42, DEPTH = 80;
+let W = 200, H = 400, PX = 3, ppu = 4, shift = 0, layout = {};
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const cw = innerWidth || document.documentElement.clientWidth || 800;
+  const ch = innerHeight || document.documentElement.clientHeight || 600;
+  const dw = Math.max(64, Math.round(cw * dpr)), dh = Math.max(64, Math.round(ch * dpr));
+  PX = Math.max(2, Math.round(Math.min(dw, dh) / 180));
+  W = Math.ceil(dw / PX); H = Math.ceil(dh / PX);
+  for (const c of [bgC, glC, fxC]) {
+    c.width = W; c.height = H;
+    c.style.width = (W * PX / dpr) + 'px'; c.style.height = (H * PX / dpr) + 'px';
+  }
+  bgImg = bgX.createImageData(W, H);
+  makeStars();
+  if (gl) makeTargets(W, H);
+  fit();
+}
+function fit() {
+  const h = bounds.maxY - bounds.minY;
+  const worldH = h * Math.cos(TILT) + 2 * bounds.maxR * Math.sin(TILT) + 4;
+  const worldW = 2 * bounds.maxR + 4;
+  ppu = Math.min(W * 0.84 / worldW, H * 0.72 / worldH);
+  // bouquet centre sits ~42% up from the bottom, leaving room for the message
+  const centerFromBottom = H * 0.42;
+  shift = centerFromBottom / H * 2 - 1;
+  layout = {
+    cx: W / 2, cy: H - centerFromBottom,
+    halfW: bounds.maxR * ppu, halfH: worldH * ppu / 2,
+    baseY: H - centerFromBottom + (h / 2) * Math.cos(TILT) * ppu,
+  };
+}
+
+/* =====================================================================
+   SKY / BACKGROUND
+   ===================================================================== */
+const SKY = [ // t, top, bottom, light tint, night amount
+  [0.00, 0x5fa8e8, 0xc4e6f7, [1, 1, 1], 0],
+  [0.26, 0x6a9ad8, 0xf6d39a, [1, .97, .9], 0],
+  [0.38, 0x5a4a9e, 0xf3907a, [1, .86, .8], .1],
+  [0.50, 0x2b2864, 0x8c5a9c, [.86, .8, .95], .6],
+  [0.60, 0x0c1032, 0x29295c, [.74, .78, 1], 1],
+  [0.80, 0x0c1032, 0x29295c, [.74, .78, 1], 1],
+  [0.90, 0x4a5aa0, 0xf2b0a0, [.96, .88, .9], .3],
+  [1.00, 0x5fa8e8, 0xc4e6f7, [1, 1, 1], 0],
+];
+function skyAt(t) {
+  let i = 0; while (i < SKY.length - 2 && SKY[i + 1][0] <= t) i++;
+  const a = SKY[i], b = SKY[i + 1], u = (t - a[0]) / (b[0] - a[0]);
+  const s = u * u * (3 - 2 * u);
+  return {
+    top: lerp3(hex2rgb(a[1]), hex2rgb(b[1]), s), bot: lerp3(hex2rgb(a[2]), hex2rgb(b[2]), s),
+    light: lerp3(a[3], b[3], s), night: lerp(a[4], b[4], s),
+  };
+}
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map(v => v / 16);
+let bgImg, stars = [], meadow = [];
+function makeStars() {
+  const r = mulberry32(7);
+  stars = []; for (let i = 0; i < W * H / 260; i++) stars.push([Math.floor(r() * W), Math.floor(r() * H * 0.75), r() * 6.28, r() < 0.15]);
+  meadow = []; for (let i = 0; i < W / 3; i++) meadow.push([Math.floor(r() * W), r(), pick([0xffffff, 0xffd84d, 0xf28ab2, 0x9cc8ff, 0xe02a1f], r)]);
+}
+function drawSky(t, time) {
+  const sk = skyAt(t), d = bgImg.data, horizon = Math.floor(H * 0.8), BANDS = 9;
+  const top = sk.top.map(v => v * 255), bot = sk.bot.map(v => v * 255);
+  for (let y = 0; y < H; y++) {
+    const v = Math.min(1, y / horizon);
+    for (let x = 0; x < W; x++) {
+      const q = clamp(Math.round(v * BANDS + BAYER[(y & 3) * 4 + (x & 3)] - 0.5), 0, BANDS) / BANDS;
+      const i = (y * W + x) * 4;
+      d[i] = lerp(top[0], bot[0], q); d[i + 1] = lerp(top[1], bot[1], q); d[i + 2] = lerp(top[2], bot[2], q); d[i + 3] = 255;
+    }
+  }
+  const px = (x, y, c, a = 1) => {
+    x |= 0; y |= 0; if (x < 0 || y < 0 || x >= W || y >= H) return;
+    const i = (y * W + x) * 4; d[i] = lerp(d[i], c[0], a); d[i + 1] = lerp(d[i + 1], c[1], a); d[i + 2] = lerp(d[i + 2], c[2], a);
+  };
+  const disc = (cx, cy, rad, c, a = 1, cut) => {
+    for (let y = -rad; y <= rad; y++) for (let x = -rad; x <= rad; x++) {
+      if (x * x + y * y > rad * rad + rad * 0.6) continue;
+      if (cut && (x - cut[0]) ** 2 + (y - cut[1]) ** 2 <= rad * rad) continue;
+      px(cx + x, cy + y, c, a);
+    }
+  };
+  // stars
+  if (sk.night > 0.05) for (const [x, y, ph, big] of stars) {
+    const b = sk.night * (0.55 + 0.45 * Math.sin(time * 1.7 + ph));
+    px(x, y, [255, 255, 235], b);
+    if (big && b > 0.5) { px(x + 1, y, [255, 255, 235], b * .5); px(x - 1, y, [255, 255, 235], b * .5); px(x, y + 1, [255, 255, 235], b * .5); px(x, y - 1, [255, 255, 235], b * .5); }
+  }
+  // sun & moon along an arc
+  const R = Math.max(4, Math.round(H * 0.028));
+  const arc = u => [W * (0.1 + 0.8 * u), horizon + R - Math.sin(u * Math.PI) * horizon * 0.72];
+  const su = ((t + 0.1) % 1) / 0.6;
+  if (su < 1) { const [x, y] = arc(su); const warm = 1 - Math.sin(su * Math.PI);
+    disc(x, y, R + 2, lerp3([255, 250, 210], [255, 170, 110], warm), 0.35); disc(x, y, R, lerp3([255, 248, 200], [255, 140, 70], warm)); }
+  const mu = (t - 0.5) / 0.4;
+  if (mu > 0 && mu < 1) { const [x, y] = arc(mu); disc(x, y, R, [240, 236, 220], clamp(sk.night * 1.3, 0, 1), [Math.round(R * 0.6), -Math.round(R * 0.3)]); }
+  // clouds
+  const cloudA = 1 - sk.night * 0.75, cc = lerp3([255, 255, 255], bot, 0.35);
+  for (let i = 0; i < 4; i++) {
+    const cx = ((time * (2 + i * 0.7) + i * W * 0.37) % (W + 80)) - 40, cy = H * (0.12 + i * 0.11);
+    const s = 5 + (i % 2) * 3;
+    disc(cx, cy, s, cc, cloudA * 0.9); disc(cx + s, cy + 2, s - 1, cc, cloudA * 0.9); disc(cx - s, cy + 2, s - 2, cc, cloudA * 0.9);
+    disc(cx + s * 2, cy + 3, s - 3, cc, cloudA * 0.9);
+  }
+  // hills
+  const dim = 1 - sk.night * 0.55, L = sk.light;
+  const back = hex2rgb(0x76ad62).map((v, k) => v * 255 * L[k] * dim), front = hex2rgb(0x4f8f48).map((v, k) => v * 255 * L[k] * dim);
+  for (let x = 0; x < W; x++) {
+    const hb = horizon - 4 + Math.sin(x * 0.03 + 1) * 4 + Math.sin(x * 0.011) * 6;
+    const hf = horizon + 10 + Math.sin(x * 0.045 + 3) * 3 + Math.sin(x * 0.017 + 1) * 5;
+    for (let y = Math.max(0, Math.floor(hb)); y < H; y++) px(x, y, y >= hf ? front : back);
+    if (Math.abs(hb - Math.round(hb)) < 0.5) px(x, hb - 1, back, 0.5);
+  }
+  for (const [x, f, c] of meadow) {
+    const hf = horizon + 10 + Math.sin(x * 0.045 + 3) * 3 + Math.sin(x * 0.017 + 1) * 5;
+    px(x, hf + 2 + f * (H - hf - 3), hex2rgb(c).map((v, k) => v * 255 * L[k] * dim));
+  }
+  bgX.putImageData(bgImg, 0, 0);
+  return sk;
+}
+
+/* =====================================================================
+   PIXEL PARTICLES
+   ===================================================================== */
+const SPR = {
+  heart: ['.XX.XX.', 'XoXXXXX', 'XXXXXXX', '.XXXXX.', '..XXX..', '...X...'],
+  heartS: ['XX.XX', 'XXXXX', '.XXX.', '..X..'],
+  star: ['..X..', '.XXX.', 'XXoXX', '.XXX.', '.X.X.'],
+  sp1: ['X'],
+  sp2: ['.X.', 'XoX', '.X.'],
+  sp3: ['..X..', '..X..', 'XXoXX', '..X..', '..X..'],
+  snow: ['X.X', '.o.', 'X.X'],
+};
+function sprite(name, x, y, col, outline) {
+  const rows = SPR[name], ox = Math.round(x - rows[0].length / 2), oy = Math.round(y - rows.length / 2);
+  if (outline) {
+    fxX.fillStyle = outline;
+    for (let j = 0; j < rows.length; j++) for (let i = 0; i < rows[j].length; i++) if (rows[j][i] !== '.')
+      for (const [a, b] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) fxX.fillRect(ox + i + a, oy + j + b, 1, 1);
+  }
+  for (let j = 0; j < rows.length; j++) for (let i = 0; i < rows[j].length; i++) {
+    const ch = rows[j][i]; if (ch === '.') continue;
+    fxX.fillStyle = ch === 'o' ? '#ffffff' : col; fxX.fillRect(ox + i, oy + j, 1, 1);
+  }
+}
+let parts = [];
+const HEARTS = ['#ff5c8a', '#ff8fb0', '#e8365e', '#ff9ec0'];
+const CONFETTI = ['#ff5c8a', '#ffd84d', '#6ad0ff', '#8ee07a', '#c08af0', '#ff9a4a'];
+function spawn(type, x, y, extra = {}) {
+  const base = { type, x, y, vx: 0, vy: 0, age: 0, life: 3, ph: Math.random() * 6.28 };
+  if (type === 'heart') Object.assign(base, { vy: -(7 + Math.random() * 6), life: 4 + Math.random() * 2, col: pick(HEARTS, Math.random), small: Math.random() < 0.5 });
+  if (type === 'sparkle') Object.assign(base, { life: 0.9 + Math.random() * 0.8, col: Math.random() < 0.5 ? '#fff6b0' : '#d8f0ff' });
+  if (type === 'star') Object.assign(base, { vx: (Math.random() - 0.5) * 3, vy: -1 - Math.random() * 2, life: 3 + Math.random() * 2, col: '#ffe066' });
+  if (type === 'snow') Object.assign(base, { vy: 8 + Math.random() * 8, life: 30, big: Math.random() < 0.3 });
+  if (type === 'confetti') Object.assign(base, { vy: 12 + Math.random() * 10, vx: (Math.random() - 0.5) * 6, life: 30, col: pick(CONFETTI, Math.random) });
+  parts.push(Object.assign(base, extra));
+}
+function aroundBouquet() {
+  const a = Math.random() * 6.28, rr = Math.sqrt(Math.random());
+  return [layout.cx + Math.cos(a) * layout.halfW * 1.25 * rr, layout.cy + Math.sin(a) * layout.halfH * 1.1 * rr];
+}
+let theme = 'default';
+const RATES = {
+  default:     { sparkle: 3,   star: 0.8, heart: 0.9 },
+  birthday:    { sparkle: 3,   star: 1.2, heart: 0.6, confetti: 7 },
+  anniversary: { sparkle: 3.5, star: 0.8, heart: 2.8 },
+  valentine:   { sparkle: 3,   star: 0.6, heart: 4 },
+  christmas:   { sparkle: 3,   star: 1.5, heart: 0.6, snow: 9 },
+};
+function updateParticles(dt, time) {
+  const rates = RATES[theme] || RATES.default;
+  for (const [type, rate] of Object.entries(rates)) {
+    let n = rate * dt; while (n > 0) { if (Math.random() < n) {
+      if (type === 'snow' || type === 'confetti') spawn(type, Math.random() * W, -4);
+      else { const [x, y] = aroundBouquet(); spawn(type, x, y); }
+    } n -= 1; }
+  }
+  fxX.clearRect(0, 0, W, H);
+  // soft pixel shadow under the bouquet
+  const bob = Math.sin(time * 1.2) * 1.5;
+  const sw = Math.round(layout.halfW * 0.38 - bob), sy = Math.round(layout.baseY + ppu * 4);
+  fxX.fillStyle = 'rgba(20,10,40,0.22)';
+  for (let y = -2; y <= 2; y++) { const w = Math.round(sw * Math.sqrt(1 - (y / 3) ** 2)); fxX.fillRect(layout.cx - w, sy + y, w * 2, 1); }
+
+  parts = parts.filter(p => p.age < p.life && p.y < H + 10);
+  for (const p of parts) {
+    p.age += dt; p.x += p.vx * dt; p.y += p.vy * dt;
+    const k = p.age / p.life;
+    if (k > 0.8 && Math.floor(p.age * 12) % 2) continue; // pixel-style blink-out
+    if (p.type === 'heart') sprite(p.small ? 'heartS' : 'heart', p.x + Math.sin(time * 2 + p.ph) * 2, p.y, p.col, '#5a1f3a');
+    else if (p.type === 'sparkle') { const f = Math.sin(k * Math.PI); sprite(f > 0.75 ? 'sp3' : f > 0.35 ? 'sp2' : 'sp1', p.x, p.y, p.col); }
+    else if (p.type === 'star') sprite(Math.sin(time * 5 + p.ph) > -0.3 ? 'star' : 'sp2', p.x, p.y, p.col, '#6a4a10');
+    else if (p.type === 'snow') { const x = p.x + Math.sin(time + p.ph) * 4; if (p.big) sprite('snow', x, p.y, '#e8f4ff'); else { fxX.fillStyle = '#ffffff'; fxX.fillRect(Math.round(x), Math.round(p.y), 1, 1); } }
+    else if (p.type === 'confetti') { fxX.fillStyle = p.col; const flip = Math.sin(time * 6 + p.ph) > 0; fxX.fillRect(Math.round(p.x + Math.sin(time * 2 + p.ph) * 3), Math.round(p.y), flip ? 2 : 1, flip ? 1 : 2); }
+  }
+}
+
+/* =====================================================================
+   MAIN LOOP + INPUT
+   ===================================================================== */
+let angle = Math.random() * 6.28, spinVel = CONFIG.spinSpeed, popT = 1, pendingSeed = null;
+function newBouquet() {
+  if (popT < 1 && pendingSeed !== null) return;
+  pendingSeed = (Math.random() * 2 ** 31) | 0; popT = 0;
+}
+function applyBouquet(seed) {
+  buildBouquet(seed);
+  if (gl) uploadMesh();
+  fit();
+}
+
+// ?time=0.65 starts at a given point of the day cycle (0 day, .38 sunset, .65 night, .9 dawn)
+const START_T = clamp(parseFloat(new URLSearchParams(location.search).get('time')) || 0.02, 0, 0.999);
+const t0 = performance.now();
+let last = t0, frame = 0;
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now; frame++;
+  const time = (now - t0) / 1000;
+  const dayT = (START_T + time / CONFIG.dayCycleSeconds) % 1;
+
+  if (!dragging) { spinVel = lerp(spinVel, CONFIG.spinSpeed, 1 - Math.exp(-dt * 1.5)); angle += spinVel * dt; }
+
+  // pop transition: shrink -> rebuild -> grow with a little overshoot
+  let s = 1;
+  if (popT < 1) {
+    popT = Math.min(1, popT + dt / 0.7);
+    if (popT < 0.35) s = 1 - (popT / 0.35);
+    else {
+      if (pendingSeed !== null) { applyBouquet(pendingSeed); pendingSeed = null; for (let i = 0; i < 24; i++) { const [x, y] = aroundBouquet(); spawn(i % 4 ? 'sparkle' : 'heart', x, y); } }
+      const u = (popT - 0.35) / 0.65; s = 1 + Math.sin(u * Math.PI) * 0.12 * (1 - u) - (1 - u) ** 3;
+    }
+    s = Math.max(0.001, s);
+  }
+
+  const sk = (frame & 1 || !bgImg.__drawn) ? (bgImg.__drawn = true, lastSky = drawSky(dayT, time)) : lastSky;
+  updateParticles(dt, time);
+
+  if (gl) {
+    const hw = W / 2 / ppu, hh = H / 2 / ppu;
+    const proj = [1 / hw, 0, 0, 0, 0, 1 / hh, 0, 0, 0, 0, -1 / DEPTH, 0, 0, 0, 0, 1];
+    const cy = (bounds.minY + bounds.maxY) / 2, bob = Math.sin(time * 1.2) * 0.6;
+    const view = mul(rotX(TILT), mul(rotY(angle), mul(scl(s), trans(0, -cy + bob, 0))));
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, W, H);
+    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE);
+    gl.useProgram(voxProg); gl.bindVertexArray(vao);
+    gl.uniformMatrix4fv(U.uProj, false, proj); gl.uniformMatrix4fv(U.uView, false, view);
+    gl.uniform1f(U.uShift, shift); gl.uniform3fv(U.uLight, sk.light.map(v => v * (1 - sk.night * 0.15)));
+    gl.drawArrays(gl.TRIANGLES, 0, vertCount);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, W, H);
+    gl.disable(gl.DEPTH_TEST);
+    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(postProg); gl.bindVertexArray(emptyVao);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, colTex); gl.uniform1i(PU.uCol, 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, depTex); gl.uniform1i(PU.uDep, 1);
+    gl.uniform3fv(PU.uOutline, lerp3([0.2, 0.1, 0.22], [0.06, 0.05, 0.14], sk.night));
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  requestAnimationFrame(loop);
+}
+let lastSky = null;
+
+let dragging = false, downX = 0, downY = 0, downT = 0, lastX = 0, lastMoveT = 0, moved = false;
+stage.addEventListener('pointerdown', e => {
+  dragging = true; moved = false; downX = lastX = e.clientX; downY = e.clientY; downT = lastMoveT = performance.now();
+  stage.setPointerCapture(e.pointerId);
+});
+stage.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  const dx = e.clientX - lastX, now = performance.now();
+  if (Math.hypot(e.clientX - downX, e.clientY - downY) > 8) moved = true;
+  if (moved) {
+    const da = dx * 0.012; angle += da;
+    spinVel = da / Math.max(0.008, (now - lastMoveT) / 1000);
+    spinVel = clamp(spinVel, -6, 6);
+  }
+  lastX = e.clientX; lastMoveT = now;
+});
+const endDrag = e => {
+  if (!dragging) return; dragging = false;
+  if (!moved && performance.now() - downT < 400) newBouquet();
+  if (performance.now() - lastMoveT > 80) spinVel = CONFIG.spinSpeed;
+};
+stage.addEventListener('pointerup', endDrag);
+stage.addEventListener('pointercancel', endDrag);
+addEventListener('keydown', e => { if (e.key === ' ' || e.key === 'Enter') newBouquet(); });
+addEventListener('resize', resize);
+
+/* ---------- start ---------- */
+const msg = todaysMessage();
+theme = msg.theme;
+document.getElementById('msg').textContent = msg.text;
+const touch = matchMedia('(pointer: coarse)').matches;
+document.getElementById('hint').textContent = (touch ? 'tap' : 'click') + ' for a new bouquet · drag to spin';
+applyBouquet((Math.random() * 2 ** 31) | 0);
+resize();
+requestAnimationFrame(loop);
+setTimeout(() => document.getElementById('msg').classList.add('show'), 600);
+setTimeout(() => document.getElementById('hint').classList.add('show'), 2500);
+setTimeout(() => document.getElementById('hint').classList.remove('show'), 9000);
+</script>
+</body>
+</html>
